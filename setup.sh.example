@@ -1,0 +1,33 @@
+#!/bin/sh
+# setup.sh — EXEMPLO / esqueleto.
+#
+# O setup.sh de verdade (fica no .gitignore) e escrito pelo Claude, DEDICADO a
+# sua maquina: seu SO, onde seu PATH aponta, symlink ou wrapper. Sem ramos de SO
+# la dentro — ele so precisa servir a uma maquina. Veja CLAUDE.md.
+#
+# Este esqueleto cobre o caso comum: Linux / macOS / WSL, com ~/.local/bin no PATH.
+# Faz duas coisas, idempotente:
+#   skill -> ~/.claude/skills/devup/SKILL.md   (copia de ./skills/devup/SKILL.md)
+#   link  -> ~/.local/bin/devup                (symlink para ./devup.sh)
+
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+BIN_DIR="$HOME/.local/bin"
+SKILL_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/devup"
+
+[ -f "$HERE/devup.sh" ] || { echo "falta $HERE/devup.sh (veja CLAUDE.md)"; exit 1; }
+
+mkdir -p "$SKILL_DIR"
+cp "$HERE/skills/devup/SKILL.md" "$SKILL_DIR/SKILL.md"
+echo "skill  $SKILL_DIR/SKILL.md"
+
+mkdir -p "$BIN_DIR"
+ln -sf "$HERE/devup.sh" "$BIN_DIR/devup"
+echo "link   $BIN_DIR/devup -> $HERE/devup.sh"
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo "path   ATENCAO: $BIN_DIR fora do PATH" ;;
+esac
+
+echo "ok. rode: devup"

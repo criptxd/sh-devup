@@ -1,0 +1,6 @@
+# copias por-pessoa, geradas a partir dos *.example no bootstrap
+devup.sh
+setup.sh
+
+# estado de runtime: logs, pids, manifesto gerado
+.devup/

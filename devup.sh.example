@@ -1,0 +1,304 @@
+#!/bin/sh
+# devup — sobe / derruba / mostra os projetos de DESENVOLVIMENTO LOCAL.
+#
+#   devup                 status   ([x] no ar  ·  [ ] parado)
+#   devup up   [projeto]  sobe tudo, ou so um
+#   devup down [projeto]  derruba tudo, ou so um
+#   devup help
+#
+# Dispara e sai (fire-and-forget). Ja no ar -> pulado, nunca duplica.
+# So dev local. NUNCA producao (tunel, deploy, etc.).
+#
+# Este arquivo e um MODELO. Copie para  devup.sh  (fica no .gitignore) e configure
+# a secao "PROJETOS" abaixo. So essa secao tem nome/caminho de projeto; o resto e
+# generico e serve para 1 ou para varios. Depois: sh setup.sh  (instala o link e a skill).
+
+set -u
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+# pasta real do script, seguindo o symlink de ~/.local/bin
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0" 2>/dev/null || echo "$0")")" && pwd -P)
+STATE="$SCRIPT_DIR/.devup"
+mkdir -p "$STATE"
+
+# ==========================================================================
+#  PROJETOS  —  a unica parte especifica. Edite aqui.
+# ==========================================================================
+
+# Pasta-base dos seus projetos. Default: a pasta que contem este repo.
+# Fixe um caminho se os projetos ficam noutro lugar, ou use  DEVUP_ROOT=/x devup ...
+ROOT="${DEVUP_ROOT:-$(dirname -- "$SCRIPT_DIR")}"
+
+# Nomes dos projetos, separados por espaco. Vazio = nada configurado.
+PROJECTS=""
+
+# Para CADA nome em PROJECTS, defina um bloco. <x> = o nome (troque - por _).
+#
+#   tipo docker  — sobe com 'docker compose up -d':
+#     TYPE_<x>=docker
+#     COMPOSE_<x>="$ROOT/<x>/compose.yaml"     # ou docker-compose.yml
+#     SERVICES_<x>=""                          # vazio = todos; ou "svc1 svc2" p/ so alguns (deixe fora o de producao)
+#     URL_<x>="http://localhost:PORTA"
+#
+#   tipo process — sobe um comando de longa duracao (ex.: um dev server):
+#     TYPE_<x>=process
+#     DIR_<x>="$ROOT/<x>"                      # cwd do comando (opcional)
+#     CMD_<x>="npm run dev"                    # dividido por espacos, sem aspas
+#     PORT_<x>=3000                            # porta que ele abre (usada p/ saber se esta no ar)
+#     URL_<x>="http://localhost:3000"
+#
+# Exemplos (descomente e ajuste, ou peca ajuda ao Claude):
+#
+#   PROJECTS="web api"
+#
+#   TYPE_web=process
+#   DIR_web="$ROOT/web"
+#   CMD_web="npm run dev -- -p 5173"
+#   PORT_web=5173
+#   URL_web="http://localhost:5173"
+#
+#   TYPE_api=docker
+#   COMPOSE_api="$ROOT/api/compose.yaml"
+#   SERVICES_api=""
+#   URL_api="http://localhost:8000"
+
+# ==========================================================================
+#  Daqui para baixo e generico — nao precisa mexer.
+# ==========================================================================
+
+LOG_MAX=500    # teto de linhas por arquivo em .devup/ (history.log e cada *.log)
+
+if [ -t 1 ]; then
+  C_ON=$(printf '\033[32m'); C_DIM=$(printf '\033[2m'); C_END=$(printf '\033[0m')
+else
+  C_ON=''; C_DIM=''; C_END=''
+fi
+
+now()    { date '+%Y-%m-%d %H:%M:%S'; }
+vsuf()   { printf '%s' "$1" | tr '-' '_'; }
+getvar() { eval "printf '%s' \"\${$1-}\""; }
+ptype()  { getvar "TYPE_$(vsuf "$1")"; }
+
+box() {  # box <on|off> <nome> [nota]
+  if [ "$1" = on ]; then _m='[x]'; _c=$C_ON; else _m='[ ]'; _c=$C_DIM; fi
+  if [ -n "${3:-}" ]; then
+    printf '  %s%s%s %-11s %s%s%s\n' "$_c" "$_m" "$C_END" "$2" "$C_DIM" "$3" "$C_END"
+  else
+    printf '  %s%s%s %s\n' "$_c" "$_m" "$C_END" "$2"
+  fi
+}
+
+record() { printf '%s  %-12s %-6s %s\n' "$(now)" "$1" "$2" "$3" >> "$STATE/history.log"; }
+
+log_run() {  # <projeto> <cmd..> : roda, anexa saida ao log do projeto, devolve rc
+  _p="$1"; shift
+  { echo "=== $(now) ==="; echo "\$ $*"; } >> "$STATE/$_p.log"
+  "$@" >> "$STATE/$_p.log" 2>&1
+  _rc=$?
+  { echo "=== rc=$_rc ==="; echo; } >> "$STATE/$_p.log"
+  return $_rc
+}
+
+trim() {  # trim <arquivo> : mantem so as ultimas $LOG_MAX linhas, no mesmo inode
+  [ -f "$1" ] || return 0
+  _n=$(( $(wc -l < "$1" 2>/dev/null || echo 0) ))
+  [ "$_n" -gt "$LOG_MAX" ] || return 0
+  _t="$1.trim.$$"
+  if tail -n "$LOG_MAX" "$1" > "$_t" 2>/dev/null; then cat "$_t" > "$1"; fi
+  rm -f "$_t"
+}
+trim_logs() { for _f in "$STATE"/*.log; do [ -e "$_f" ] && trim "$_f"; done; }
+
+port_up()     { [ -n "${1:-}" ] && ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"; }
+pid_on_port() { ss -ltnp 2>/dev/null | awk -v p="[:.]$1\$" '$4 ~ p && match($0, /pid=[0-9]+/) { print substr($0, RSTART + 4, RLENGTH - 4); exit }'; }
+
+ensure_node() {  # poe npm no PATH (nvm) fora de um shell interativo
+  command -v npm >/dev/null 2>&1 && return 0
+  [ -s "$HOME/.nvm/nvm.sh" ] && { NVM_DIR="$HOME/.nvm"; export NVM_DIR; . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true; }
+  command -v npm >/dev/null 2>&1 && return 0
+  for _d in "$HOME/.nvm/versions/node"/*/bin; do
+    [ -x "$_d/npm" ] && { PATH="$_d:$PATH"; export PATH; }
+  done
+  command -v npm >/dev/null 2>&1
+}
+
+# --- tipo docker ----------------------------------------------------------
+dc_file() { getvar "COMPOSE_$(vsuf "$1")"; }
+dc_svcs() { getvar "SERVICES_$(vsuf "$1")"; }
+dc_expected() {
+  _s=$(dc_svcs "$1")
+  if [ -n "$_s" ]; then printf '%s\n' $_s
+  else docker compose -f "$(dc_file "$1")" config --services 2>/dev/null
+  fi
+}
+dc_running() { docker compose -f "$(dc_file "$1")" ps --status running --format '{{.Service}}' 2>/dev/null; }
+dc_state() {  # up | partial | down
+  _run=$(dc_running "$1"); _miss=
+  for _s in $(dc_expected "$1"); do
+    printf '%s\n' $_run | grep -qx "$_s" || _miss="x$_miss"
+  done
+  if [ -n "$_run" ] && [ -z "$_miss" ]; then echo up
+  elif [ -n "$_run" ]; then echo partial
+  else echo down
+  fi
+}
+dock_start() {
+  _p="$1"
+  command -v docker >/dev/null 2>&1 || { box off "$_p" "sem docker"; record "$_p" erro "docker ausente"; return 1; }
+  _sv=$(dc_svcs "$_p")
+  if log_run "$_p" docker compose -f "$(dc_file "$_p")" up -d $_sv; then
+    box on "$_p" "iniciado"; record "$_p" up "compose up -d ${_sv:-<todos>}"
+  else
+    box off "$_p" "erro (.devup/$_p.log)"; record "$_p" erro "compose up falhou"; return 1
+  fi
+}
+dock_stop() {
+  _p="$1"
+  command -v docker >/dev/null 2>&1 || { box off "$_p" "sem docker"; return 1; }
+  [ "$(dc_state "$_p")" = down ] && { box off "$_p" "ja parado"; record "$_p" skip "nada rodando"; return 0; }
+  _sv=$(dc_svcs "$_p")
+  if log_run "$_p" docker compose -f "$(dc_file "$_p")" stop $_sv; then
+    box off "$_p" "encerrado"; record "$_p" down ""
+  else
+    box off "$_p" "erro (.devup/$_p.log)"; record "$_p" erro "compose stop falhou"
+  fi
+}
+
+# --- tipo process -------------------------------------------------------------
+proc_start() {
+  _n="$1"
+  _dir=$(getvar "DIR_$(vsuf "$_n")")
+  _cmd=$(getvar "CMD_$(vsuf "$_n")")
+  _port=$(getvar "PORT_$(vsuf "$_n")")
+  [ -n "$_cmd" ] || { box off "$_n" "falta CMD_$(vsuf "$_n") no devup.sh"; record "$_n" erro "sem CMD"; return 1; }
+  case "$_cmd" in
+    npm\ *|npx\ *|pnpm\ *|yarn\ *|node\ *)
+      ensure_node || { box off "$_n" "sem npm (nvm?)"; record "$_n" erro "npm ausente"; return 1; } ;;
+  esac
+  { echo "=== $(now)  up: $_cmd ==="; } >> "$STATE/$_n.log"
+  # setsid = nova sessao: sobrevive a este script sair. o proprio sh grava seu PID
+  # (lider do grupo) antes de virar o comando -> 'down' mata a arvore toda.
+  setsid sh -c 'p=$1; d=$2; shift 2; echo $$ > "$p"; [ -z "$d" ] || cd "$d" || exit 1; exec "$@"' \
+    sh "$STATE/$_n.pid" "$_dir" $_cmd >> "$STATE/$_n.log" 2>&1 &
+  if [ -n "$_port" ]; then
+    _i=0; while [ "$_i" -lt 15 ]; do port_up "$_port" && break; sleep 1; _i=$((_i + 1)); done
+    if port_up "$_port"; then box on "$_n" "iniciado"; record "$_n" up "pid=$(cat "$STATE/$_n.pid" 2>/dev/null)"
+    else box off "$_n" "subindo... (.devup/$_n.log)"; record "$_n" wait "iniciando"
+    fi
+  else
+    sleep 1; box on "$_n" "disparado"; record "$_n" up "pid=$(cat "$STATE/$_n.pid" 2>/dev/null); sem PORT_"
+  fi
+}
+proc_stop() {
+  _n="$1"; _port=$(getvar "PORT_$(vsuf "$_n")"); _did=0
+  if [ -f "$STATE/$_n.pid" ]; then
+    _pid=$(cat "$STATE/$_n.pid" 2>/dev/null || true)
+    if [ -n "${_pid:-}" ] && [ "$_pid" != "$$" ] && kill -0 "$_pid" 2>/dev/null; then
+      kill -TERM "-$_pid" 2>/dev/null || kill -TERM "$_pid" 2>/dev/null || true
+      _did=1
+    fi
+    rm -f "$STATE/$_n.pid"
+  fi
+  if [ -n "$_port" ]; then
+    _i=0
+    while [ "$_i" -lt 6 ] && port_up "$_port"; do
+      _lp=$(pid_on_port "$_port")
+      [ -n "$_lp" ] && [ "$_lp" != "$$" ] && kill -TERM "$_lp" 2>/dev/null && _did=1
+      sleep 1; _i=$((_i + 1))
+    done
+    if port_up "$_port"; then box on "$_n" "ainda no ar"; record "$_n" warn "porta viva apos TERM"; return; fi
+  fi
+  if [ "$_did" = 1 ]; then box off "$_n" "encerrado"; record "$_n" down ""
+  else box off "$_n" "ja parado"; record "$_n" skip "nada rodando"
+  fi
+}
+
+# --- dispatch por tipo ---------------------------------------------------
+state() {  # up | partial | down
+  case "$(ptype "$1")" in
+    process) if port_up "$(getvar "PORT_$(vsuf "$1")")"; then echo up; else echo down; fi ;;
+    docker)  dc_state "$1" ;;
+    *)       echo down ;;
+  esac
+}
+start_one() {
+  _p="$1"
+  [ "$(state "$_p")" = up ] && { box on "$_p" "ja rodando"; record "$_p" skip "ja no ar"; return 0; }
+  case "$(ptype "$_p")" in
+    process) proc_start "$_p" ;;
+    docker)  dock_start "$_p" ;;
+    *) box off "$_p" "TYPE_$(vsuf "$_p") ausente/invalido no devup.sh"; record "$_p" erro "type invalido"; return 1 ;;
+  esac
+}
+stop_one() {
+  case "$(ptype "$1")" in
+    process) proc_stop "$1" ;;
+    docker)  dock_stop "$1" ;;
+    *) box off "$1" "TYPE_$(vsuf "$1") ausente/invalido"; record "$1" erro "type invalido"; return 1 ;;
+  esac
+}
+status_one() {
+  case "$(state "$1")" in
+    up)      box on  "$1" ;;
+    partial) box off "$1" "parcial" ;;
+    *)       box off "$1" ;;
+  esac
+}
+
+write_manifest() {  # snapshot do que o script sabe subir -- diffavel se algo mudar
+  {
+    echo "# gerado por devup.sh -- $(now). Nao editar a mao."
+    printf '%s\t%s\t%s\t%s\n' projeto tipo url comando
+    for _p in $PROJECTS; do
+      _t=$(ptype "$_p"); _u=$(getvar "URL_$(vsuf "$_p")")
+      case "$_t" in
+        process) _c="$(getvar "CMD_$(vsuf "$_p")")  (cwd: $(getvar "DIR_$(vsuf "$_p")"))" ;;
+        docker)  _sv=$(dc_svcs "$_p"); _c="docker compose -f $(dc_file "$_p") up -d ${_sv:-<todos>}" ;;
+        *)       _c='?' ;;
+      esac
+      printf '%s\t%s\t%s\t%s\n' "$_p" "${_t:-?}" "$_u" "$_c"
+    done
+  } > "$STATE/projects.tsv"
+}
+
+show_help() {
+  printf '\n  devup\n  devup up [projeto]\n  devup down [projeto]\n  devup help\n\n'
+}
+
+# --- args -------------------------------------------------------------
+CMD=status
+case "${1:-}" in
+  '')              CMD=status ;;
+  status)          CMD=status; shift ;;
+  up|start)        CMD=up;     shift ;;
+  down|stop)       CMD=down;   shift ;;
+  help|-h|--help)  show_help; exit 0 ;;
+  *) printf 'devup: comando desconhecido: %s\n' "$1" >&2; show_help >&2; exit 2 ;;
+esac
+
+PROJECTS=$(echo $PROJECTS)   # normaliza espacos
+if [ -z "$PROJECTS" ]; then
+  printf '\n  devup: nenhum projeto configurado.\n  edite %s/devup.sh (secao PROJETOS; modelo em devup.sh.example).\n\n' "$SCRIPT_DIR" >&2
+  exit 1
+fi
+
+TARGETS=$*
+[ -n "$TARGETS" ] || TARGETS=$PROJECTS
+for _t in $TARGETS; do
+  case " $PROJECTS " in
+    *" $_t "*) ;;
+    *) printf 'devup: projeto desconhecido: %s  (%s)\n' "$_t" "$PROJECTS" >&2; exit 2 ;;
+  esac
+done
+
+write_manifest
+printf '\n'
+for _p in $TARGETS; do
+  case "$CMD" in
+    status) status_one "$_p" ;;
+    up)     start_one  "$_p" ;;
+    down)   stop_one   "$_p" ;;
+  esac
+done
+printf '\n'
+trim_logs
