@@ -1,7 +1,7 @@
 #!/bin/sh
 # devup — sobe / derruba / mostra os projetos de DESENVOLVIMENTO LOCAL.
 #
-#   devup                 status   ([x] no ar  ·  [ ] parado)
+#   devup                 status   (◆ no ar  ·  ◇ parado)
 #   devup up   [projeto]  sobe tudo, ou so um
 #   devup down [projeto]  derruba tudo, ou so um
 #   devup help
@@ -80,7 +80,7 @@ getvar() { eval "printf '%s' \"\${$1-}\""; }
 ptype()  { getvar "TYPE_$(vsuf "$1")"; }
 
 box() {  # box <on|off> <nome> [nota]
-  if [ "$1" = on ]; then _m='[x]'; _c=$C_ON; else _m='[ ]'; _c=$C_DIM; fi
+  if [ "$1" = on ]; then _m='◆'; _c=$C_ON; else _m='◇'; _c=$C_DIM; fi
   if [ -n "${3:-}" ]; then
     printf '  %s%s%s %-11s %s%s%s\n' "$_c" "$_m" "$C_END" "$2" "$C_DIM" "$3" "$C_END"
   else

@@ -42,7 +42,7 @@ Faça o bootstrap para esta pessoa. Se `devup.sh` e `setup.sh` já existem, pule
 
    **Windows nativo (PowerShell, fora do WSL):** não use o `devup.sh`. Escreva um
    `sh-devup/devup.ps1` equivalente — mesmos comandos (sem args = status, `up`,
-   `down`, `help`), mesmo `[x]` / `[ ]`, mesma seção PROJETOS no topo, tipos
+   `down`, `help`), mesmo `◆` / `◇`, mesma seção PROJETOS no topo, tipos
    `docker` e `process` — usando o `devup.sh` como referência. O "setup" no Windows
    é: copiar `skills\devup\SKILL.md` para `%USERPROFILE%\.claude\skills\devup\` e
    deixar `devup` chamável (função no `$PROFILE`, ou um `devup.cmd` numa pasta do

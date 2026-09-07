@@ -16,7 +16,7 @@ Origem: o repo-template `sh-devup/`. Versionados: `devup.sh.example`,
 
 ## Comandos
 
-    devup                 status   ([x] no ar  ·  [ ] parado)
+    devup                 status   (◆ no ar  ·  ◇ parado)
     devup up   [projeto]  sobe tudo, ou só um
     devup down [projeto]  derruba tudo, ou só um
     devup help
