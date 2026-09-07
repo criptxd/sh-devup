@@ -238,10 +238,11 @@ stop_one() {
   esac
 }
 status_one() {
+  _u=$(getvar "URL_$(vsuf "$1")")
   case "$(state "$1")" in
-    up)      box on  "$1" ;;
-    partial) box off "$1" "parcial" ;;
-    *)       box off "$1" ;;
+    up)      box on  "$1" "$_u" ;;
+    partial) box off "$1" "parcial${_u:+  ·  $_u}" ;;
+    *)       box off "$1" "$_u" ;;
   esac
 }
 
